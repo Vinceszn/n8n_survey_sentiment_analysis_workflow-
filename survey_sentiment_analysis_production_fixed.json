@@ -1,0 +1,347 @@
+{
+  "name": "🔍 Production Survey Data Aggregation & Sentiment Analysis",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "survey-analysis",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 200],
+      "id": "webhook-trigger-001",
+      "name": "📥 Survey Webhook Trigger",
+      "webhookId": "survey-analysis-main"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "hours", "hoursInterval": 24}]
+        }
+      },
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [0, 400],
+      "id": "cron-trigger-001",
+      "name": "⏰ Daily Analysis Trigger"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "1",
+              "leftValue": "={{ $json.httpMethod }}",
+              "rightValue": "POST",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "condition-check-001",
+      "name": "🔍 Check Request Type",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [220, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "try {\n  const allInputs = $input.all();\n  if (!allInputs || allInputs.length === 0) {\n    throw new Error('No input data available');\n  }\n  const inputData = allInputs[0];\n  \n  let surveyData = [];\n  let dataSource = 'unknown';\n  let processingMode = 'webhook';\n  let validationErrors = [];\n  \n  if (inputData.httpMethod === 'POST') {\n    processingMode = 'webhook';\n    \n    if (!inputData.body) {\n      validationErrors.push('Missing request body');\n    } else {\n      if (inputData.body.form_response) {\n        dataSource = 'typeform';\n        const response = inputData.body.form_response;\n        \n        if (!response.token) validationErrors.push('Missing Typeform token');\n        if (!response.submitted_at) validationErrors.push('Missing submission timestamp');\n        \n        if (validationErrors.length === 0) {\n          surveyData = [{\n            id: response.token,\n            submitted_at: response.submitted_at,\n            answers: response.answers,\n            source: 'typeform',\n            raw_data: response\n          }];\n        }\n      } else {\n        dataSource = 'generic_form';\n        const randomId = 'gen_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);\n        surveyData = [{\n          id: randomId,\n          submitted_at: new Date().toISOString(),\n          answers: inputData.body,\n          source: 'generic_form',\n          raw_data: inputData.body\n        }];\n      }\n    }\n  } else {\n    processingMode = 'scheduled';\n    dataSource = 'scheduled_fetch';\n    surveyData = [];\n  }\n  \n  const batchId = 'batch_' + Date.now();\n  const result = {\n    processing_mode: processingMode,\n    data_source: dataSource,\n    response_count: surveyData.length,\n    survey_data: surveyData,\n    processing_timestamp: new Date().toISOString(),\n    batch_id: batchId,\n    validation_errors: validationErrors,\n    validation_status: validationErrors.length === 0 ? 'valid' : 'invalid'\n  };\n  \n  return [{ json: result }];\n  \n} catch (error) {\n  return [{ json: {\n    error: true,\n    error_message: error.message,\n    processing_mode: 'error',\n    validation_status: 'error'\n  } }];\n}"
+      },
+      "id": "data-processor-001",
+      "name": "📊 Production Survey Data Processor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "survey_responses",
+        "columns": "response_id, source_platform, submitted_at, raw_data, processing_status",
+        "additionalFields": {}
+      },
+      "id": "db-insert-response-001",
+      "name": "💾 Store Survey Response",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [660, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"{{ $json.validation_status === 'valid' ? 'success' : 'error' }}\",\n  \"message\": \"{{ $json.validation_status === 'valid' ? 'Survey received successfully' : 'Validation failed' }}\",\n  \"timestamp\": \"{{ $json.processing_timestamp }}\",\n  \"data\": {\n    \"responses_processed\": {{ $json.response_count || 0 }},\n    \"data_source\": \"{{ $json.data_source }}\",\n    \"batch_id\": \"{{ $json.batch_id }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "webhook-response-001",
+      "name": "✅ Production Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [880, 100]
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "table": "survey_responses",
+        "where": {
+          "conditions": [
+            {
+              "column": "processing_status",
+              "operator": "equal",
+              "value": "pending"
+            }
+          ]
+        },
+        "sort": {
+          "field": "submitted_at",
+          "direction": "ASC"
+        },
+        "limit": 50
+      },
+      "id": "db-fetch-pending-001",
+      "name": "📥 Fetch Pending Responses",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [660, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "try {\n  const inputData = $input.all()[0].json;\n  let surveyData = [];\n  \n  if (inputData.survey_data && inputData.survey_data.length > 0) {\n    surveyData = inputData.survey_data;\n  } else if (Array.isArray(inputData)) {\n    surveyData = inputData.map(row => ({\n      id: row.response_id,\n      submitted_at: row.submitted_at,\n      source: row.source_platform,\n      answers: typeof row.raw_data === 'string' ? JSON.parse(row.raw_data) : row.raw_data,\n      database_id: row.id\n    }));\n  }\n  \n  if (surveyData.length === 0) {\n    return [{ json: { text_extracts: [], extraction_summary: { total_responses: 0 } } }];\n  }\n  \n  const textExtracts = [];\n  \n  surveyData.forEach((response, index) => {\n    const answers = response.answers || {};\n    let extractedTexts = [];\n    \n    if (Array.isArray(answers)) {\n      answers.forEach(answer => {\n        if (answer.text && answer.text.length > 5) {\n          const fieldRef = answer.field && answer.field.ref ? answer.field.ref : (answer.field && answer.field.id ? answer.field.id : 'unknown');\n          extractedTexts.push({\n            field: fieldRef,\n            text: answer.text,\n            length: answer.text.length\n          });\n        }\n      });\n    } else if (typeof answers === 'object') {\n      Object.keys(answers).forEach(key => {\n        const value = answers[key];\n        if (typeof value === 'string' && value.length > 5) {\n          extractedTexts.push({\n            field: key,\n            text: value,\n            length: value.length\n          });\n        }\n      });\n    }\n    \n    if (extractedTexts.length > 0) {\n      textExtracts.push({\n        response_id: response.id,\n        database_id: response.database_id,\n        submitted_at: response.submitted_at,\n        source: response.source,\n        texts: extractedTexts,\n        combined_text: extractedTexts.map(t => t.text).join(' '),\n        total_length: extractedTexts.reduce((sum, t) => sum + t.length, 0)\n      });\n    }\n  });\n  \n  const result = Object.assign({}, inputData, {\n    text_extracts: textExtracts,\n    extraction_summary: {\n      total_responses: surveyData.length,\n      responses_with_text: textExtracts.length,\n      total_text_length: textExtracts.reduce((sum, t) => sum + t.total_length, 0)\n    }\n  });\n  \n  return [{ json: result }];\n  \n} catch (error) {\n  return [{ json: { error: true, error_message: error.message, text_extracts: [] } }];\n}"
+      },
+      "id": "text-extractor-001",
+      "name": "📝 Production Text Extractor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-your-openai-api-key-here"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "gpt-3.5-turbo"
+            },
+            {
+              "name": "messages",
+              "value": "=[{\"role\": \"system\", \"content\": \"Analyze survey responses for sentiment. Return JSON with sentiment (positive/negative/neutral), score (-1 to 1), and urgency (low/medium/high).\"}, {\"role\": \"user\", \"content\": \"Analyze: \" + JSON.stringify($json.text_extracts.map(t => ({id: t.response_id, text: t.combined_text})))}]"
+            },
+            {
+              "name": "max_tokens",
+              "value": 2000
+            },
+            {
+              "name": "temperature",
+              "value": 0.3
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "openai-sentiment-001",
+      "name": "🧠 Production OpenAI Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment-latest",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer hf-your-huggingface-token-here"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "inputs",
+              "value": "={{ $json.text_extracts.map(t => t.combined_text) }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "huggingface-sentiment-001",
+      "name": "🤗 Production HuggingFace Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "try {\n  const allInputs = $input.all();\n  if (!allInputs || allInputs.length === 0) {\n    throw new Error('No sentiment analysis results available');\n  }\n  \n  let openaiResults = null;\n  let huggingfaceResults = null;\n  let originalData = null;\n  \n  // Process inputs from both sentiment analysis services\n  allInputs.forEach(input => {\n    const data = input.json;\n    \n    // Check if this is OpenAI response\n    if (data.choices && data.choices[0] && data.choices[0].message) {\n      try {\n        const content = data.choices[0].message.content;\n        openaiResults = typeof content === 'string' ? JSON.parse(content) : content;\n      } catch (e) {\n        console.log('Failed to parse OpenAI response:', e.message);\n      }\n    }\n    \n    // Check if this is HuggingFace response\n    else if (Array.isArray(data) && data[0] && Array.isArray(data[0])) {\n      huggingfaceResults = data;\n    }\n    \n    // Check if this contains original survey data\n    else if (data.text_extracts || data.extraction_summary) {\n      originalData = data;\n    }\n  });\n  \n  // Get original data from the first input if not found\n  if (!originalData && allInputs[0].json.text_extracts) {\n    originalData = allInputs[0].json;\n  }\n  \n  if (!originalData || !originalData.text_extracts) {\n    throw new Error('Original survey data not found in inputs');\n  }\n  \n  const processedResults = [];\n  const textExtracts = originalData.text_extracts;\n  \n  textExtracts.forEach((extract, index) => {\n    let combinedSentiment = {\n      response_id: extract.response_id,\n      database_id: extract.database_id,\n      submitted_at: extract.submitted_at,\n      source: extract.source,\n      text_length: extract.total_length,\n      analysis_timestamp: new Date().toISOString()\n    };\n    \n    // Process OpenAI results\n    if (openaiResults && Array.isArray(openaiResults)) {\n      const openaiResult = openaiResults.find(r => r.id === extract.response_id);\n      if (openaiResult) {\n        combinedSentiment.openai = {\n          sentiment: openaiResult.sentiment || 'neutral',\n          score: parseFloat(openaiResult.score) || 0,\n          urgency: openaiResult.urgency || 'low',\n          confidence: openaiResult.confidence || 0.5\n        };\n      }\n    }\n    \n    // Process HuggingFace results\n    if (huggingfaceResults && huggingfaceResults[index]) {\n      const hfResult = huggingfaceResults[index];\n      if (Array.isArray(hfResult)) {\n        const topResult = hfResult.reduce((prev, current) => \n          (prev.score > current.score) ? prev : current\n        );\n        \n        let normalizedSentiment = 'neutral';\n        let normalizedScore = 0;\n        \n        if (topResult.label === 'LABEL_2' || topResult.label.toLowerCase().includes('pos')) {\n          normalizedSentiment = 'positive';\n          normalizedScore = topResult.score;\n        } else if (topResult.label === 'LABEL_0' || topResult.label.toLowerCase().includes('neg')) {\n          normalizedSentiment = 'negative';\n          normalizedScore = -topResult.score;\n        }\n        \n        combinedSentiment.huggingface = {\n          sentiment: normalizedSentiment,\n          score: normalizedScore,\n          confidence: topResult.score,\n          raw_label: topResult.label\n        };\n      }\n    }\n    \n    // Calculate consensus sentiment\n    const sentiments = [];\n    const scores = [];\n    \n    if (combinedSentiment.openai) {\n      sentiments.push(combinedSentiment.openai.sentiment);\n      scores.push(combinedSentiment.openai.score);\n    }\n    \n    if (combinedSentiment.huggingface) {\n      sentiments.push(combinedSentiment.huggingface.sentiment);\n      scores.push(combinedSentiment.huggingface.score);\n    }\n    \n    // Determine consensus\n    let consensusSentiment = 'neutral';\n    let consensusScore = 0;\n    let consensusConfidence = 0;\n    \n    if (scores.length > 0) {\n      consensusScore = scores.reduce((a, b) => a + b, 0) / scores.length;\n      \n      if (consensusScore > 0.1) {\n        consensusSentiment = 'positive';\n      } else if (consensusScore < -0.1) {\n        consensusSentiment = 'negative';\n      }\n      \n      // Calculate confidence based on agreement\n      const posCount = sentiments.filter(s => s === 'positive').length;\n      const negCount = sentiments.filter(s => s === 'negative').length;\n      const neuCount = sentiments.filter(s => s === 'neutral').length;\n      \n      const maxCount = Math.max(posCount, negCount, neuCount);\n      consensusConfidence = maxCount / sentiments.length;\n    }\n    \n    combinedSentiment.consensus = {\n      sentiment: consensusSentiment,\n      score: consensusScore,\n      confidence: consensusConfidence,\n      agreement_level: consensusConfidence >= 0.8 ? 'high' : consensusConfidence >= 0.6 ? 'medium' : 'low'\n    };\n    \n    // Determine urgency based on sentiment and confidence\n    let urgency = 'low';\n    if (Math.abs(consensusScore) > 0.7 && consensusConfidence > 0.7) {\n      urgency = consensusSentiment === 'negative' ? 'high' : 'medium';\n    } else if (Math.abs(consensusScore) > 0.4) {\n      urgency = 'medium';\n    }\n    \n    combinedSentiment.urgency = urgency;\n    combinedSentiment.requires_attention = urgency === 'high' || (consensusSentiment === 'negative' && consensusConfidence > 0.6);\n    \n    processedResults.push(combinedSentiment);\n  });\n  \n  // Calculate batch statistics\n  const batchStats = {\n    total_responses: processedResults.length,\n    sentiment_distribution: {\n      positive: processedResults.filter(r => r.consensus.sentiment === 'positive').length,\n      negative: processedResults.filter(r => r.consensus.sentiment === 'negative').length,\n      neutral: processedResults.filter(r => r.consensus.sentiment === 'neutral').length\n    },\n    urgency_distribution: {\n      high: processedResults.filter(r => r.urgency === 'high').length,\n      medium: processedResults.filter(r => r.urgency === 'medium').length,\n      low: processedResults.filter(r => r.urgency === 'low').length\n    },\n    average_sentiment_score: processedResults.length > 0 ? \n      processedResults.reduce((sum, r) => sum + r.consensus.score, 0) / processedResults.length : 0,\n    high_confidence_results: processedResults.filter(r => r.consensus.confidence > 0.7).length,\n    attention_required: processedResults.filter(r => r.requires_attention).length\n  };\n  \n  const result = Object.assign({}, originalData, {\n    sentiment_results: processedResults,\n    batch_statistics: batchStats,\n    processing_complete: true,\n    analysis_timestamp: new Date().toISOString(),\n    services_used: {\n      openai: !!openaiResults,\n      huggingface: !!huggingfaceResults\n    }\n  });\n  \n  return [{ json: result }];\n  \n} catch (error) {\n  return [{ json: {\n    error: true,\n    error_message: error.message,\n    sentiment_results: [],\n    processing_complete: false\n  } }];\n}"
+      },
+      "id": "sentiment-processor-001",
+      "name": "🎯 Production Sentiment Results Processor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 300]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "📥 Survey Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "🔍 Check Request Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⏰ Daily Analysis Trigger": {
+      "main": [
+        [
+          {
+            "node": "📥 Fetch Pending Responses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔍 Check Request Type": {
+      "main": [
+        [
+          {
+            "node": "📊 Production Survey Data Processor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "✅ Production Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📊 Production Survey Data Processor": {
+      "main": [
+        [
+          {
+            "node": "💾 Store Survey Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "💾 Store Survey Response": {
+      "main": [
+        [
+          {
+            "node": "📝 Production Text Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📥 Fetch Pending Responses": {
+      "main": [
+        [
+          {
+            "node": "📝 Production Text Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📝 Production Text Extractor": {
+      "main": [
+        [
+          {
+            "node": "🧠 Production OpenAI Analysis",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "🤗 Production HuggingFace Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🧠 Production OpenAI Analysis": {
+      "main": [
+        [
+          {
+            "node": "🎯 Production Sentiment Results Processor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🤗 Production HuggingFace Analysis": {
+      "main": [
+        [
+          {
+            "node": "🎯 Production Sentiment Results Processor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "survey-analysis-production-v2",
+  "meta": {
+    "instanceId": "survey-sentiment-analysis-production-fixed"
+  },
+  "id": "ProductionSurveyAnalysisWorkflowFixed",
+  "tags": ["survey", "sentiment", "analysis", "production", "postgresql"]
+}
